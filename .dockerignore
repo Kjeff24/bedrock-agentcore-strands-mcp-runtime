@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+
+# Terraform
+infra/
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Documentation
+docs/
+*.md
+!src/**/*.md
+
+# CI/CD
+.github/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Scripts
+*.sh
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+.DS_Store
+.env
+.env.*
