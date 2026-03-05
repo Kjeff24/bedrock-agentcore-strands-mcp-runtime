@@ -1,0 +1,55 @@
+# Gateway with MCP server using OAuth authentication
+gateway_name              = "my-gateway"
+environment_name          = "dev"
+gateway_authorizer_type   = "AWS_IAM"
+
+# MCP Target Configuration
+add_mcp_target            = true
+mcp_server_endpoint       = "https://your-mcp-server.example.com"
+mcp_auth_type             = "OAUTH"
+
+# OAuth Configuration - Google Example
+mcp_oauth_config = {
+  provider_vendor = "GoogleOauth2"
+  client_id       = "your-client-id.apps.googleusercontent.com"
+  client_secret   = "your-client-secret"
+  scopes          = ["https://www.googleapis.com/auth/userinfo.email"]
+}
+
+# OAuth Configuration - GitHub Example
+# mcp_oauth_config = {
+#   provider_vendor = "GitHub"
+#   client_id       = "your-github-client-id"
+#   client_secret   = "your-github-client-secret"
+#   scopes          = ["read:user", "user:email"]
+# }
+
+# OAuth Configuration - Microsoft Example
+# mcp_oauth_config = {
+#   provider_vendor = "Microsoft"
+#   client_id       = "your-azure-app-id"
+#   client_secret   = "your-azure-client-secret"
+#   scopes          = ["User.Read"]
+# }
+
+# OAuth Configuration - Custom Provider
+# mcp_oauth_config = {
+#   provider_vendor        = "CustomOauth2"
+#   client_id              = "your-client-id"
+#   client_secret          = "your-client-secret"
+#   scopes                 = ["read", "write"]
+#   issuer                 = "https://auth.example.com"
+#   authorization_endpoint = "https://auth.example.com/oauth/authorize"
+#   token_endpoint         = "https://auth.example.com/oauth/token"
+# }
+
+
+# OAuth Configuration - Atlassian
+# mcp_oauth_config = {
+#   provider_vendor = "Custom"
+#   client_id       = "your-client-id"
+#   scopes          = ["openid" "email" "profile"]
+#   issuer                 = "https://cf.mcp.atlassian.com"
+#   authorization_endpoint = "https://mcp.atlassian.com/v1/authorize"
+#   token_endpoint        = "https://cf.mcp.atlassian.com/v1/token"
+# }

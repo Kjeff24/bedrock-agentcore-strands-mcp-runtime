@@ -1,0 +1,15 @@
+# Gateway with MCP server using API Key authentication
+gateway_name              = "my-gateway"
+environment_name          = "dev"
+gateway_authorizer_type   = "AWS_IAM"
+
+# MCP Target Configuration
+add_mcp_target            = true
+mcp_server_endpoint       = "https://your-mcp-server.example.com"
+mcp_auth_type             = "API_KEY"
+
+# API Key Configuration
+mcp_api_key_config = {
+  secret_arn  = "arn:aws:secretsmanager:us-east-1:123456789012:secret:mcp-api-key-abc123"
+  header_name = "X-API-Key"
+}

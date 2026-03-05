@@ -1,0 +1,31 @@
+# Basic runtime deployment
+runtime_name          = "my-agent-runtime"
+container_image_uri   = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/agentcore-strands-agent:latest"
+environment_name      = "dev"
+network_mode          = "PUBLIC"
+protocol_type         = "MCP"
+
+# Optional: Gateway integration
+# gateway_id  = "your-gateway-id"   # For IAM permissions
+# gateway_url = "https://bedrock-agentcore.eu-west-1.amazonaws.com/gateways/your-gateway-id"  # For agent connection
+
+# Optional: Memory integration
+# memory_id = "your-memory-id"
+
+# Optional: Custom environment variables for your agent
+# environment_variables = {
+#   MODEL_ID            = "eu.anthropic.claude-sonnet-4-20250514-v1:0"
+#   MODEL_REGION        = "eu-west-1"
+#   GATEWAY_URL         = "https://your-gateway-url"  # If using gateway
+#   GATEWAY_AUTH_TYPE   = "IAM"                       # IAM or JWT
+#   JWT_TOKEN           = "your-jwt-token"            # If using JWT auth
+# }
+
+# Optional: Force redeployment by changing this value
+# force_redeploy = "1709049600"  # Use timestamp or git commit SHA
+
+# Optional: VPC configuration (if network_mode = "VPC")
+# vpc_config = {
+#   subnet_ids         = ["subnet-xxx", "subnet-yyy"]
+#   security_group_ids = ["sg-xxx"]
+# }
