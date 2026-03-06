@@ -1,136 +1,213 @@
+"""AgentCore Runtime entry point.
+
+All heavy lifting is delegated to focused modules:
+  config        – environment variables & system prompt
+  hooks         – MemoryHook (Strands lifecycle callbacks)
+  transport     – EnvTokenProvider + MCP transport factories
+  agent_factory – get_agent() (cached Agent variants)
+  utils         – clean_text / clean_message_payload
+"""
+import logging
 import os
-import warnings
+
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands import Agent
-from strands.models.bedrock import BedrockModel
-from strands.hooks import AgentInitializedEvent, HookProvider, MessageAddedEvent
-from strands.tools.mcp.mcp_client import MCPClient
-from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
-from pathlib import Path
 
-# Suppress deprecation warnings from websockets library
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+from .agent_factory import get_agent
+from .utils import clean_message_payload, clean_text
 
-# Load the system prompt from system-prompt.md
-PROMPT_PATH = Path(__file__).parent / "system-prompt.md"
-SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+logger = logging.getLogger(__name__)
 
-# Model configuration
-MODEL_ID = os.environ.get("MODEL_ID", "eu.anthropic.claude-sonnet-4-20250514-v1:0")
-MODEL_REGION = os.environ.get("MODEL_REGION", "eu-west-1")
-
-# Gateway configuration
-GATEWAY_URL = os.environ.get("GATEWAY_URL")
-GATEWAY_AUTH_TYPE = os.environ.get("GATEWAY_AUTH_TYPE", "IAM")
-JWT_TOKEN = os.environ.get("JWT_TOKEN")
-
-# Memory configuration
-MEMORY_ID = os.environ.get("MEMORY_ID")
-
-
-class MemoryHook(HookProvider):
-    def on_agent_initialized(self, event):
-        if not MEMORY_ID:
-            return
-        from bedrock_agentcore.memory import MemoryClient
-        memory_client = MemoryClient(region_name=MODEL_REGION)
-        session_id = event.agent.state.get("session_id") or "default"
-        turns = memory_client.get_last_k_turns(
-            memory_id=MEMORY_ID,
-            actor_id="user",
-            session_id=session_id,
-            k=3
-        )
-        if turns:
-            context = "\n".join([f"{m['role']}: {m['content']['text']}" for t in turns for m in t])
-            event.agent.system_prompt += f"\n\nPrevious:\n{context}"
-
-    def on_message_added(self, event):
-        if not MEMORY_ID:
-            return
-        from bedrock_agentcore.memory import MemoryClient
-        memory_client = MemoryClient(region_name=MODEL_REGION)
-        msg = event.agent.messages[-1]
-        session_id = event.agent.state.get("session_id") or "default"
-        memory_client.create_event(
-            memory_id=MEMORY_ID,
-            actor_id="user",
-            session_id=session_id,
-            messages=[(str(msg["content"]), msg["role"])]
-        )
-
-    def register_hooks(self, registry):
-        registry.add_callback(AgentInitializedEvent, self.on_agent_initialized)
-        registry.add_callback(MessageAddedEvent, self.on_message_added)
-
-
-def create_mcp_transport():
-    """Create MCP transport with appropriate authentication"""
-    if not GATEWAY_URL:
-        return None
-    
-    if GATEWAY_AUTH_TYPE == "JWT":
-        from mcp.client.streamable_http import streamable_http_client
-        def jwt_factory():
-            headers = {"Authorization": f"Bearer {JWT_TOKEN}"}
-            return streamable_http_client(GATEWAY_URL, headers=headers)
-        return jwt_factory
-    else:
-        # AWS_IAM: Use mcp-proxy-for-aws for SigV4 signing
-        def iam_factory():
-            return aws_iam_streamablehttp_client(
-                endpoint=GATEWAY_URL,
-                aws_region=MODEL_REGION,
-                aws_service="bedrock-agentcore"
-            )
-        return iam_factory
-
-
-# Initialize Bedrock model
-bedrock_model = BedrockModel(
-    model_id=MODEL_ID,
-    region_name=MODEL_REGION,
-)
-
-# Configure hooks
-hooks = [MemoryHook()] if MEMORY_ID else []
-
-# Get Gateway MCP client if configured
-mcp_client = None
-if GATEWAY_URL:
-    try:
-        mcp_factory = create_mcp_transport()
-        mcp_client = MCPClient(mcp_factory)
-        print(f"Initialized MCP client for Gateway")
-    except Exception as e:
-        print(f"Warning: Failed to connect to Gateway at {GATEWAY_URL}: {e}")
-        print("Agent will start without Gateway tools")
-
-# Create Strands agent
-strands_agent = Agent(
-    model=bedrock_model,
-    system_prompt=SYSTEM_PROMPT,
-    tools=[mcp_client] if mcp_client else [],
-    hooks=hooks,
-    state={"session_id": "default"}
-)
-
-# Initialize AgentCore app
 app = BedrockAgentCoreApp()
 
 
-@app.entrypoint
-def invoke(payload):
-    """Process user input and return a response"""
-    print(f"Received payload: {payload}")
-    # Extract the prompt string from nested structure
-    input_data = payload.get("input", payload)
-    user_message = input_data.get("prompt") if isinstance(input_data, dict) else input_data
-    print(f"Extracted message: {user_message}")
-    result = strands_agent(user_message)
-    return {"result": str(result.message)}
+# ---------------------------------------------------------------------------
+# Helpers shared by both entrypoints
+# ---------------------------------------------------------------------------
 
+def _extract_user_message(payload: dict) -> str | None:
+    """Pull the prompt string out of the (potentially nested) request payload."""
+    input_data = payload.get("input", payload)
+    if isinstance(input_data, dict):
+        return input_data.get("prompt")
+    return input_data
+
+
+def _set_atlassian_token(payload: dict) -> str | None:
+    """Inject the Atlassian token from the payload into the environment."""
+    token = payload.get("atlassianToken")
+    if token:
+        os.environ["ATLASSIAN_ACCESS_TOKEN"] = token
+    return token
+
+
+def _normalise_result(result) -> dict:
+    """Convert a Strands agent result into a JSON-serialisable message dict."""
+    message = result.message
+    if isinstance(message, (dict, list)):
+        return clean_message_payload(message)
+    return {
+        "role": "assistant",
+        "content": [{"text": clean_text(message)}],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Entrypoints
+# ---------------------------------------------------------------------------
+
+@app.entrypoint
+def invoke(payload: dict) -> dict:
+    """Synchronous (non-streaming) entrypoint."""
+    logger.info("Received payload: %s", payload)
+    atlassian_token = _set_atlassian_token(payload)
+    agent = get_agent(with_atlassian=bool(atlassian_token))
+    user_message = _extract_user_message(payload)
+    logger.info("Extracted message: %s", user_message)
+    return {"result": _normalise_result(agent(user_message))}
+
+
+@app.entrypoint
+async def invoke_stream(payload: dict, context=None):
+    """Streaming entrypoint that yields Bedrock-compatible event dicts."""
+    logger.info("Received streaming payload: %s", payload)
+    atlassian_token = _set_atlassian_token(payload)
+    agent = get_agent(with_atlassian=bool(atlassian_token))
+    user_message = _extract_user_message(payload)
+
+    if not user_message:
+        yield {"error": "No prompt provided"}
+        return
+
+    if hasattr(agent, "stream_async"):
+        async for event in _stream_events(agent, user_message, context):
+            yield event
+    else:
+        async for event in _stream_fallback(agent, user_message):
+            yield event
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+async def _stream_events(agent, user_message: str, context):
+    """Forward filtered/cleaned events from agent.stream_async."""
+    tool_block_indices: set[int] = set()
+    try:
+        async for event in agent.stream_async(
+            user_message, invocation_state={"context": context}
+        ):
+            if not ("event" in event or "message" in event or "error" in event):
+                continue
+
+            if "event" in event:
+                evt = event["event"]
+                filtered, tool_block_indices = _filter_tool_event(evt, tool_block_indices)
+                if filtered:
+                    continue
+                _clean_delta(evt)
+
+            if "message" in event:
+                if _is_tool_message(event["message"]):
+                    continue
+                _clean_message_content(event["message"])
+
+            yield event
+    except Exception as exc:
+        yield {"error": f"Streaming failed: {exc}"}
+
+
+def _filter_tool_event(evt: dict, indices: set[int]) -> tuple[bool, set[int]]:
+    """Return (should_skip, updated_indices) for a raw event dict."""
+    if "contentBlockStart" in evt:
+        start = evt["contentBlockStart"].get("start", {})
+        if "toolUse" in start:
+            idx = evt["contentBlockStart"].get("contentBlockIndex")
+            logger.info(
+                "MCP toolUse started: name=%s index=%s",
+                start.get("name"),
+                idx,
+            )
+            return True, indices | {idx}
+
+    if "contentBlockDelta" in evt and "toolUse" in evt["contentBlockDelta"].get("delta", {}):
+        return True, indices
+
+    if "contentBlockStop" in evt:
+        idx = evt["contentBlockStop"].get("contentBlockIndex")
+        if idx in indices:
+            logger.info("MCP toolUse finished: index=%s", idx)
+            return True, indices - {idx}
+
+    if "messageStop" in evt and evt["messageStop"].get("stopReason") == "tool_use":
+        return True, indices
+
+    return False, indices
+
+
+def _is_tool_message(message: dict) -> bool:
+    content = message.get("content", [])
+    return isinstance(content, list) and any(
+        "toolResult" in item or "toolUse" in item for item in content
+    )
+
+
+def _clean_message_content(message: dict) -> None:
+    message["content"] = [
+        {**item, "text": clean_text(item["text"])}
+        if isinstance(item, dict) and "text" in item
+        else item
+        for item in message.get("content", [])
+    ]
+
+
+def _clean_delta(evt: dict) -> None:
+    """Strip tool markup from incremental contentBlockDelta text in-place."""
+    if not isinstance(evt, dict):
+        return
+    delta = evt.get("contentBlockDelta", {}).get("delta")
+    if isinstance(delta, dict) and "text" in delta:
+        delta["text"] = clean_text(delta["text"], preserve_whitespace=True)
+
+
+async def _stream_fallback(agent, user_message: str):
+    """One-shot fallback for agents that don't support stream_async."""
+    try:
+        result_payload = _normalise_result(agent(user_message))
+        if isinstance(result_payload, dict) and "content" in result_payload:
+            yield {"message": clean_message_payload(result_payload)}
+        else:
+            yield {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": clean_text(str(result_payload))}],
+                }
+            }
+    except Exception as exc:
+        yield {"error": f"Invocation failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.ping
+def ping():
+    from bedrock_agentcore.runtime import PingStatus
+    return PingStatus.HEALTHY
+
+
+# ---------------------------------------------------------------------------
+# Local run
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app.run()
+    logger.info("🚀 Starting AgentCore Runtime...")
+    logger.info("   Health check: /ping")
+    logger.info("   Ready to receive requests at /invocations")
+    try:
+        app.run()
+    except Exception as exc:
+        logger.exception("Failed to start: %s", exc)
+        import traceback
+        traceback.print_exc()
