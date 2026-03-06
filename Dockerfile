@@ -21,5 +21,5 @@ EXPOSE 8080
 # Set Python to unbuffered mode for better logging
 ENV PYTHONUNBUFFERED=1
 
-# Run with the SDK app using the installed venv
-CMD [".venv/bin/python", "src/agentcore_strands/agent.py"]
+# Run as a module so relative imports within the package resolve correctly
+CMD [".venv/bin/python", "-m", "agentcore_strands.agent"]
