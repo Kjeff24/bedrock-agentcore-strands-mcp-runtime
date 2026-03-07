@@ -1,0 +1,14 @@
+# GitHub MCP Server Configuration Example
+# This example shows how to configure the Gateway to connect to GitHub's MCP server
+
+add_mcp_target      = true
+mcp_server_endpoint = "https://api.githubcopilot.com/mcp/"
+mcp_auth_type       = "API_KEY"
+mcp_api_key_config = {
+  value       = "Bearer ghp_YOUR_GITHUB_PERSONAL_ACCESS_TOKEN"
+  header_name = "Authorization"
+}
+
+# Note: Create a GitHub Personal Access Token at:
+# https://github.com/settings/personal-access-tokens/new
+# Required scopes: repo, read:org (adjust based on your needs)
