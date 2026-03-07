@@ -39,6 +39,8 @@ module "auth" {
     client_secret          = ""
     scopes                 = []
     callback_urls          = []
+    grant_type             = "CLIENT_CREDENTIALS"
+    return_url             = ""
   }
 }
 
@@ -60,4 +62,6 @@ module "gateway" {
   api_key_header_name     = local.use_api_key ? var.mcp_api_key_config.header_name : ""
   oauth_provider_arn      = local.use_oauth ? module.auth[0].oauth_provider_arn : ""
   oauth_scopes            = local.use_oauth ? var.mcp_oauth_config.scopes : []
+  oauth_grant_type        = local.use_oauth ? var.mcp_oauth_config.grant_type : "CLIENT_CREDENTIALS"
+  oauth_return_url        = local.use_oauth ? var.mcp_oauth_config.return_url : ""
 }

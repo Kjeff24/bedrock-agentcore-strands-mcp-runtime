@@ -77,3 +77,13 @@ variable "oauth_scopes" {
   type        = list(string)
   description = "OAuth scopes"
 }
+
+variable "oauth_grant_type" {
+  type        = string
+  description = "OAuth grant type"
+}
+
+variable "oauth_return_url" {
+  type        = string
+  description = "OAuth callback URL"
+}

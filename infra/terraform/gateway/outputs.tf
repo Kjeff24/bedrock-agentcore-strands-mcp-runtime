@@ -26,4 +26,5 @@ output "workload_identity_arn" {
 output "api_key_secret_arn" {
   description = "API Key Secret ARN (if created)"
   value       = local.use_api_key ? module.auth[0].api_key_secret_arn : null
+  sensitive   = true
 }

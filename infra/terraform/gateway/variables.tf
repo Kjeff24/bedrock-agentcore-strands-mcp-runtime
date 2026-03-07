@@ -128,15 +128,19 @@ variable "mcp_oauth_config" {
     client_secret          = optional(string, "")
     scopes                 = optional(list(string), [])
     callback_urls          = optional(list(string), [])
+    grant_type             = optional(string, "CLIENT_CREDENTIALS")
+    return_url             = optional(string, "")
   })
   default     = null
   sensitive   = true
-  description = "MCP OAuth configuration (required for OAUTH auth). For PKCE, omit client_secret and set response_types=['code']"
+  description = "MCP OAuth configuration (required for OAUTH auth)"
 
   validation {
     condition = var.mcp_oauth_config == null || (
       var.mcp_oauth_config.provider_vendor != "" &&
       var.mcp_oauth_config.client_id != "" &&
+      contains(["CLIENT_CREDENTIALS", "AUTHORIZATION_CODE"], var.mcp_oauth_config.grant_type) &&
+      (var.mcp_oauth_config.grant_type != "AUTHORIZATION_CODE" || var.mcp_oauth_config.return_url != "") &&
       (
         var.mcp_oauth_config.provider_vendor != "CustomOauth2" ||
         (
@@ -146,6 +150,6 @@ variable "mcp_oauth_config" {
         )
       )
     )
-    error_message = "OAuth config requires: provider_vendor, client_id. CustomOauth2 also requires: issuer, authorization_endpoint, token_endpoint."
+    error_message = "OAuth config requires: provider_vendor, client_id, valid grant_type. AUTHORIZATION_CODE requires return_url. CustomOauth2 requires: issuer, authorization_endpoint, token_endpoint."
   }
 }
