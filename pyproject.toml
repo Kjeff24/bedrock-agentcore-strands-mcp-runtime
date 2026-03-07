@@ -7,6 +7,7 @@ dependencies = [
     "bedrock-agentcore>=0.1.0",
     "aws-opentelemetry-distro>=0.15.0",
     "mcp-proxy-for-aws>=1.1.5",
+    "httpx>=0.24.0",
 ]
 
 [build-system]

@@ -13,6 +13,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aws-opentelemetry-distro" },
     { name = "bedrock-agentcore" },
+    { name = "httpx" },
     { name = "mcp-proxy-for-aws" },
     { name = "strands-agents" },
 ]
@@ -21,6 +22,7 @@ dependencies = [
 requires-dist = [
     { name = "aws-opentelemetry-distro", specifier = ">=0.15.0" },
     { name = "bedrock-agentcore", specifier = ">=0.1.0" },
+    { name = "httpx", specifier = ">=0.24.0" },
     { name = "mcp-proxy-for-aws", specifier = ">=1.1.5" },
     { name = "strands-agents", specifier = ">=0.1.0" },
 ]
