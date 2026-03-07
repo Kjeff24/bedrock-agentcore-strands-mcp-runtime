@@ -113,6 +113,14 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
     network_mode = var.network_mode
   }
 
+  # JWT Authorization Configuration
+  authorizer_configuration {
+    custom_jwt_authorizer {
+      discovery_url    = "${var.jwt_issuer}/.well-known/openid-configuration"
+      allowed_clients  = [var.jwt_audience]  # Use allowed_clients instead of allowed_audience
+    }
+  }
+
   environment_variables = merge(
     var.environment_variables,
     var.memory_id != "" ? { MEMORY_ID = var.memory_id } : {},

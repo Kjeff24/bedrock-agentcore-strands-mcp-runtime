@@ -78,3 +78,16 @@ variable "environment_variables" {
   default     = {}
   description = "Additional environment variables for the agent container"
 }
+
+# JWT Authentication Configuration
+variable "jwt_issuer" {
+  description = "JWT issuer URL (Cognito authority)"
+  type        = string
+  default     = ""
+}
+
+variable "jwt_audience" {
+  description = "JWT audience (Cognito client ID)"
+  type        = string
+  default     = ""
+}
