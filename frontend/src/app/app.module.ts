@@ -1,0 +1,51 @@
+import { NgModule } from '@angular/core';
+import { BrowserModule } from '@angular/platform-browser';
+import { HttpClientModule } from '@angular/common/http';
+import { FormsModule } from '@angular/forms';
+import { RouterModule, Routes } from '@angular/router';
+import { CommonModule } from '@angular/common';
+import { AuthModule } from 'angular-auth-oidc-client';
+import { MarkdownModule } from 'ngx-markdown';
+
+import { AppComponent } from './app.component';
+import { ChatComponent } from './components/chat.component';
+import { environment } from '../environments/environment';
+
+const routes: Routes = [
+  { path: '', component: ChatComponent },
+  { path: 'callback', component: ChatComponent },
+  { path: '**', redirectTo: '' }
+];
+
+@NgModule({
+  declarations: [
+    AppComponent,
+    ChatComponent
+  ],
+  imports: [
+    BrowserModule,
+    CommonModule,
+    HttpClientModule,
+    FormsModule,
+    RouterModule.forRoot(routes),
+    MarkdownModule.forRoot(),
+    AuthModule.forRoot({
+      config: {
+        authority: environment.cognito.authority,
+        redirectUrl: environment.cognito.redirectUrl,
+        postLogoutRedirectUri: environment.cognito.logoutUrl,
+        clientId: environment.cognito.clientId,
+        scope: environment.cognito.scope,
+        responseType: 'code',
+        silentRenew: true,
+        useRefreshToken: true,
+        renewTimeBeforeTokenExpiresInSeconds: 30,
+        ignoreNonceAfterRefresh: true,
+        triggerRefreshWhenIdTokenExpired: false
+      }
+    })
+  ],
+  providers: [],
+  bootstrap: [AppComponent]
+})
+export class AppModule { }
