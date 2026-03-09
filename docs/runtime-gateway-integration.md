@@ -1,5 +1,7 @@
 # Connecting Strands Agent (AgentCore Runtime) to AgentCore Gateway
 
+> **Note:** The AgentCore Gateway is not currently deployed in this project. This document is kept as a reference for future use. The runtime currently connects directly to the Atlassian MCP server without a gateway intermediary.
+
 ## Architecture Overview
 
 ```
@@ -30,7 +32,7 @@
 ### Using Terraform
 
 ```bash
-cd templates/terraform/gateway
+cd infra/terraform/gateway
 
 # For API Key authentication
 terraform apply \
@@ -69,13 +71,13 @@ terraform output gateway_url
 ### Terraform
 
 ```bash
-cd templates/terraform/runtime
+cd infra/terraform/runtime
 
 terraform apply \
   -var="runtime_name=my-strands-agent" \
   -var="container_image_uri=123456789012.dkr.ecr.us-east-1.amazonaws.com/strands-agent:latest" \
   -var='environment_variables={
-    MCP_GATEWAY_URL="https://gateway-id.bedrock-agentcore.us-east-1.amazonaws.com"
+    GATEWAY_URL="https://gateway-id.bedrock-agentcore.us-east-1.amazonaws.com"
   }'
 ```
 
@@ -105,48 +107,48 @@ from strands.models import BedrockModel
 from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client
 
-class StrandsAgentWithGateway:
-    def __init__(self):
-        self.gateway_url = os.environ.get("GATEWAY_URL")
-        self.auth_type = os.environ.get("GATEWAY_AUTH_TYPE", "IAM")
-        self.jwt_token = os.environ.get("JWT_TOKEN")
-        
-    def _create_mcp_transport(self):
-        """Create MCP transport with appropriate authentication"""
-        if self.auth_type == "JWT":
-            # CUSTOM_JWT: Use Bearer token
-            headers = {"Authorization": f"Bearer {self.jwt_token}"}
-            return streamablehttp_client(self.gateway_url, headers=headers)
-        else:
-            # AWS_IAM: Runtime's IAM role is used automatically
-            return streamablehttp_client(self.gateway_url)
-    
-    def run(self, prompt: str, model_id: str = "us.anthropic.claude-sonnet-4-20250514-v1:0"):
-        """Run agent with gateway tools"""
-        mcp_client = MCPClient(self._create_mcp_transport)
-        
-        with mcp_client:
-            tools = mcp_client.list_tools_sync()
-            
-            bedrock_model = BedrockModel(
-                inference_profile_id=model_id,
-                temperature=0.0,
-                streaming=True,
-            )
-            
-            agent = Agent(
-                model=bedrock_model,
-                tools=tools
-            )
-            
-            response = agent(prompt)
-            return response
+import os
+from strands import Agent
+from strands.models.bedrock import BedrockModel
+from strands.tools.mcp.mcp_client import MCPClient
+from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-# FastAPI endpoints for AgentCore Runtime
-from fastapi import FastAPI, Request
+GATEWAY_URL = os.environ["GATEWAY_URL"]
+MODEL_REGION = os.environ.get("MODEL_REGION", "eu-west-1")
 
-app = FastAPI()
-agent_runner = StrandsAgentWithGateway()
+app = BedrockAgentCoreApp()
+
+# The gateway transport uses AWS IAM SigV4 — the runtime's IAM role
+# is used automatically. No tokens or credentials needed in code.
+def _gateway_transport():
+    return aws_iam_streamablehttp_client(
+        endpoint=GATEWAY_URL,
+        aws_region=MODEL_REGION,
+        aws_service="bedrock-agentcore",
+    )
+
+bedrock_model = BedrockModel(
+    model_id="eu.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name=MODEL_REGION,
+)
+
+# MCPClient must be in tools= at Agent() construction time.
+# Strands discovers tool definitions at construction — not lazily.
+agent = Agent(
+    model=bedrock_model,
+    tools=[MCPClient(_gateway_transport)],
+)
+
+@app.entrypoint
+def invoke(payload: dict) -> dict:
+    result = agent(payload["prompt"])
+    return {"result": result.message}
+
+@app.entrypoint
+async def invoke_stream(payload: dict, context=None):
+    async for event in agent.stream_async(payload["prompt"]):
+        yield event
 
 @app.get("/ping")
 async def ping():
@@ -168,28 +170,18 @@ if __name__ == "__main__":
 
 ### Environment Variables in Runtime
 
-**For AWS_IAM authorizer (default):**
 ```hcl
+cd infra/terraform/runtime
+
 terraform apply \
   -var="runtime_name=my-strands-agent" \
   -var="container_image_uri=123456789012.dkr.ecr.us-east-1.amazonaws.com/strands-agent:latest" \
   -var='environment_variables={
-    GATEWAY_URL="https://gateway-abc123.bedrock-agentcore.us-east-1.amazonaws.com",
-    GATEWAY_AUTH_TYPE="IAM"
+    GATEWAY_URL="https://gateway-abc123.bedrock-agentcore.us-east-1.amazonaws.com"
   }'
 ```
 
-**For CUSTOM_JWT authorizer:**
-```hcl
-terraform apply \
-  -var="runtime_name=my-strands-agent" \
-  -var="container_image_uri=123456789012.dkr.ecr.us-east-1.amazonaws.com/strands-agent:latest" \
-  -var='environment_variables={
-    GATEWAY_URL="https://gateway-abc123.bedrock-agentcore.us-east-1.amazonaws.com",
-    GATEWAY_AUTH_TYPE="JWT",
-    JWT_TOKEN="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
-  }'
-```
+The gateway connection always uses AWS IAM SigV4 signing via the runtime's attached IAM role. No `GATEWAY_AUTH_TYPE` or JWT token env vars are needed.
 
 
 
@@ -425,7 +417,9 @@ curl -X POST https://runtime-xyz.bedrock-agentcore.us-east-1.amazonaws.com/invoc
 
 ## Complete Example
 
-See the full working example in the repository:
-- [agent.py](../agent.py) - Strands agent implementation
+See the full working implementation in the repository:
+- [src/agentcore_strands/agent.py](../src/agentcore_strands/agent.py) - Runtime entrypoints
+- [src/agentcore_strands/agent_factory.py](../src/agentcore_strands/agent_factory.py) - Agent + MCPClient construction
+- [src/agentcore_strands/transport.py](../src/agentcore_strands/transport.py) - Gateway and Atlassian transports
 - [Dockerfile](../Dockerfile) - Container configuration
-- [templates/terraform/](../templates/terraform/) - Infrastructure code
+- [infra/terraform/](../infra/terraform/) - Infrastructure code

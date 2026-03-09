@@ -28,6 +28,9 @@ docs/
 # CI/CD
 .github/
 
+# Frontend (served separately, not part of the runtime image)
+frontend/
+
 # Docker
 Dockerfile
 .dockerignore
