@@ -61,28 +61,29 @@ logging.info("Agent started")   # ✅ Shows in CloudWatch
 
 ## Add Structured Logging
 
+Logging is configured in `config.py` and all modules use the standard `logging` module:
+
 ```python
 import sys
 import logging
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
 )
 
 logger = logging.getLogger(__name__)
 
-@app.post("/invocations")
-async def invoke_agent(request: InvocationRequest):
-    logger.info(f"Received request: {request.input}")
+@app.entrypoint
+def invoke(payload: dict) -> dict:
+    logger.info("Received request for prompt: %s", payload.get("prompt"))
     try:
-        result = strands_agent(request.input.get("prompt"))
+        result = agent(payload["prompt"])
         logger.info("Request processed successfully")
-        return InvocationResponse(output={"response": result})
-    except Exception as e:
-        logger.error(f"Error processing request: {e}", exc_info=True)
+        return {"result": result.message}
+    except Exception as exc:
+        logger.exception("Error processing request: %s", exc)
         raise
 ```
 

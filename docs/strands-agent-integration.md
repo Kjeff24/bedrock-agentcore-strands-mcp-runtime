@@ -1,108 +1,122 @@
-# Integrating AgentCore Gateway with Strands Agent
+# Strands Agent Integration
 
 ## Overview
-The AgentCore Gateway acts as an MCP server that your Strands agent can connect to for accessing tools and resources.
 
-## Step 1: Deploy the Gateway
+This project uses [Strands](https://github.com/strands-agents/sdk-python) as the agent framework running inside an AWS Bedrock AgentCore Runtime container. Strands manages tool discovery, conversation state, and model calls. Atlassian MCP tools are connected via `MCPClient`.
 
-```bash
-cd infra/terraform/gateway
+## Architecture
 
-terraform init
-terraform apply \
-  -var="gateway_name=my-gateway" \
-  -var="add_mcp_target=true" \
-  -var="mcp_server_endpoint=https://mcp-server.example.com" \
-  -var="mcp_auth_type=API_KEY" \
-  -var='mcp_api_key_config={value="your-api-key"}'
+```
+┌─────────────────────────────────────────────────────┐
+│  BedrockAgentCoreApp                                │
+│  ┌──────────────────────────────────────────────┐  │
+│  │  Strands Agent                               │  │
+│  │  ├── BedrockModel (Claude via Bedrock)       │  │
+│  │  ├── MCPClient → streamable_http_client      │  │
+│  │  │   (Atlassian MCP, Bearer token)           │  │
+│  │  └── MemoryHook (Bedrock AgentCore Memory)   │  │
+│  └──────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
 ```
 
-Get the Gateway URL:
-```bash
-terraform output gateway_url
-```
+## Key Design: Tool Discovery at Construction Time
 
-## Step 2: Configure Your Strands Agent
+Strands discovers MCP tool definitions when `Agent()` is constructed, not lazily. You cannot append MCP clients to an existing agent instance — they must be in `tools=` at construction time.
 
-In your Strands agent code, configure the MCP client to connect to the gateway:
+This project handles it with a two-variant cache in `agent_factory.py`:
 
 ```python
+# agent_factory.py
 from strands import Agent
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from strands.models.bedrock import BedrockModel
+from strands.tools.mcp.mcp_client import MCPClient
+from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
 
-# Gateway URL from CloudFormation output
-GATEWAY_URL = "https://your-gateway-url.amazonaws.com"
+bedrock_model = BedrockModel(model_id=MODEL_ID, region_name=MODEL_REGION)
 
-async def setup_agent():
-    # Create MCP client session connected to the gateway
-    async with stdio_client(
-        StdioServerParameters(
-            command="curl",
-            args=["-X", "POST", GATEWAY_URL],
-            env={"AWS_REGION": "us-east-1"}
+_agent_cache: dict[str, Agent] = {}
+
+def get_agent(*, with_atlassian: bool = False) -> Agent:
+    cache_key = "atlassian" if with_atlassian else "base"
+    if cache_key not in _agent_cache:
+        clients = []
+        if with_atlassian:
+            clients.append(MCPClient(create_atlassian_transport()))
+        _agent_cache[cache_key] = Agent(
+            model=bedrock_model,
+            system_prompt=SYSTEM_PROMPT,
+            tools=clients,
+            hooks=hooks,
         )
-    ) as (read, write):
-        async with ClientSession(read, write) as session:
-            # Initialize the session
-            await session.initialize()
-            
-            # List available tools from the gateway
-            tools = await session.list_tools()
-            
-            # Create your Strands agent with the MCP tools
-            agent = Agent(
-                name="my-strands-agent",
-                mcp_session=session,
-                tools=tools
-            )
-            
-            return agent
+    return _agent_cache[cache_key]
 ```
 
-## Step 3: Use Gateway in Agent Runtime
+## Atlassian Transport (OAuth Bearer)
 
-If deploying your Strands agent on AgentCore Runtime, set the gateway URL as an environment variable in your Terraform configuration:
+The Atlassian MCP transport reads the per-request token from a `ContextVar` (bound by `set_atlassian_token()` at request time):
 
-```hcl
-# In infra/terraform/runtime/main.tf or via variables
-terraform apply \
-  -var="runtime_name=my-strands-agent" \
-  -var="container_image_uri=123456789012.dkr.ecr.us-east-1.amazonaws.com/strands-agent:latest" \
-  -var="gateway_id=your-gateway-id"
-```
-
-Then in your agent container:
 ```python
-import os
-from strands import Agent
+from mcp.client.streamable_http import streamable_http_client
 
-gateway_url = os.environ["GATEWAY_URL"]
-agent = Agent.from_mcp_gateway(gateway_url)
+def create_atlassian_transport():
+    @asynccontextmanager
+    async def _transport():
+        token = EnvTokenProvider().get_access_token()  # reads ContextVar
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=..., follow_redirects=True
+        ) as http_client:
+            async with streamable_http_client(
+                "https://mcp.atlassian.com/v1/mcp",
+                http_client=http_client,
+                terminate_on_close=True,
+            ) as streams:
+                yield streams
+    return _transport
 ```
 
-## Step 4: Add MCP Tools to Gateway
+## Entrypoints
 
-The gateway needs to be connected to actual MCP servers. Configure this when deploying the gateway:
+The runtime exposes two entrypoints via `BedrockAgentCoreApp`:
+
+```python
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+def invoke(payload: dict) -> dict:
+    """Synchronous invocation."""
+    atlassian_token = payload.get("atlassianToken")
+    if atlassian_token:
+        set_atlassian_token(atlassian_token)
+    agent = get_agent(with_atlassian=bool(atlassian_token))
+    result = agent(payload["prompt"])
+    return {"result": result.message}
+
+@app.entrypoint
+async def invoke_stream(payload: dict, context=None):
+    """Streaming invocation — yields event dicts."""
+    ...
+    async for event in agent.stream_async(user_message):
+        yield event
+
+@app.ping
+def ping():
+    from bedrock_agentcore.runtime import PingStatus
+    return PingStatus.HEALTHY
+```
+
+## Deploy
 
 ```bash
+cd infra/terraform/runtime
 terraform apply \
-  -var="add_mcp_target=true" \
-  -var="mcp_server_endpoint=https://your-mcp-server.com" \
-  -var="mcp_auth_type=OAUTH" \
-  -var='mcp_oauth_config={provider_vendor="GoogleOauth2",client_id="your-id",client_secret="your-secret",scopes=["read","write"]}'
+  -var="container_image_uri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/agentcore-strands-agent:latest"
 ```
 
-## Authentication
+The `MODEL_ID`, `MODEL_REGION`, and `MEMORY_ID` variables are configured in `terraform.tfvars`.
 
-The gateway uses AWS_IAM authentication. Your Strands agent needs AWS credentials:
+## References
 
-```python
-import boto3
-
-# Use AWS credentials to sign requests to the gateway
-session = boto3.Session()
-credentials = session.get_credentials()
-```
-
-Or use IAM roles if running on AgentCore Runtime (automatic).
+- [Strands SDK](https://github.com/strands-agents/sdk-python)
+- [Bedrock AgentCore Runtime docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime.html)

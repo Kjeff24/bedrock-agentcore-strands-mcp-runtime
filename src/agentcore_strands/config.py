@@ -16,7 +16,6 @@ logging.basicConfig(
 
 MODEL_ID: str = os.environ.get("MODEL_ID", "eu.anthropic.claude-sonnet-4-20250514-v1:0")
 MODEL_REGION: str = os.environ.get("MODEL_REGION", "eu-west-1")
-GATEWAY_URL: str | None = os.environ.get("GATEWAY_URL")
 MEMORY_ID: str | None = os.environ.get("MEMORY_ID")
 
 SYSTEM_PROMPT: str = (Path(__file__).parent / "system-prompt.md").read_text(encoding="utf-8")
