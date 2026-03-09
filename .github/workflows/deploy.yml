@@ -2,9 +2,9 @@ name: Deploy AgentCore Infrastructure
 
 on:
   push:
-    branches: [main]
+    branches: [none]
   pull_request:
-    branches: [main]
+    branches: [none]
   workflow_dispatch:
 
 env:
