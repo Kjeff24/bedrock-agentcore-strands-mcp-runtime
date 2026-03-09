@@ -14,13 +14,16 @@ export class AgentService {
 
   constructor(private http: HttpClient) {}
 
-  invokeAgent(prompt: string, atlassianToken?: string): Observable<any> {
+  invokeAgent(prompt: string, atlassianToken?: string, sessionId?: string): Observable<any> {
     const payload: any = {
       input: { prompt }
     };
 
     if (atlassianToken) {
       payload.atlassianToken = atlassianToken;
+    }
+    if (sessionId) {
+      payload.sessionId = sessionId;
     }
 
     return this.oidcSecurityService.getAccessToken().pipe(
@@ -39,9 +42,10 @@ export class AgentService {
    * Streaming invocation using Fetch + ReadableStream.
    * Exposes a stream of raw JSON event strings from the backend.
    */
-  invokeAgentStream(prompt: string, atlassianToken?: string): Observable<string> {
+  invokeAgentStream(prompt: string, atlassianToken?: string, sessionId?: string): Observable<string> {
     const payload: any = { input: { prompt } };
     if (atlassianToken) payload.atlassianToken = atlassianToken;
+    if (sessionId) payload.sessionId = sessionId;
 
     return this.oidcSecurityService.getAccessToken().pipe(
       switchMap(token =>

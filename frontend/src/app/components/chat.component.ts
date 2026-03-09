@@ -19,6 +19,7 @@ export class ChatComponent implements OnInit {
   isAwsAuthenticated = false;
   isAtlassianAuthenticated = false;
   useStreaming = true;
+  sessionId: string | undefined;
 
   constructor(
     private oauthService: OAuthService,
@@ -26,14 +27,24 @@ export class ChatComponent implements OnInit {
   ) {}
 
   ngOnInit(): void {
-    this.initAwsAuth();
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
+
     if (path === '/callback') {
+      // Cognito redirect — let the OIDC library see the URL as-is.
+      this.initAwsAuth();
       this.handleCognitoCallback();
     } else if (path === '/' && params.has('code') && params.has('state')) {
+      // Atlassian OAuth callback. Strip code/state from the URL BEFORE calling
+      // checkAuth() so the OIDC library doesn't mistake Atlassian's params for
+      // a Cognito auth callback and invalidate the existing Cognito session.
+      window.history.replaceState({}, document.title, window.location.pathname);
+      this.initAwsAuth();
       this.handleAtlassianCallback(params.get('code')!, params.get('state')!);
+    } else {
+      this.initAwsAuth();
     }
+
     this.isAtlassianAuthenticated = this.oauthService.isAtlassianAuthenticated();
   }
 
@@ -72,9 +83,9 @@ export class ChatComponent implements OnInit {
 
     try {
       if (this.useStreaming) {
-        this.sendStreaming(text, atlassianToken);
+        this.sendStreaming(text, atlassianToken, this.sessionId);
       } else {
-        this.sendNonStreaming(text, atlassianToken);
+        this.sendNonStreaming(text, atlassianToken, this.sessionId);
       }
     } catch (error: any) {
       this.pushErrorMessage(error.message);
@@ -84,12 +95,23 @@ export class ChatComponent implements OnInit {
 
   // ─── Private helpers ───────────────────────────────────────────────────────
 
+  /** Enter sends, Shift+Enter inserts a newline. */
+  onKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      this.sendMessage();
+    }
+  }
+
   private initAwsAuth(): void {
     this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
       this.isAwsAuthenticated = isAuthenticated;
     });
     this.oidcSecurityService.isAuthenticated$.subscribe(({ isAuthenticated }) => {
       this.isAwsAuthenticated = isAuthenticated;
+    });
+    this.oidcSecurityService.userData$.subscribe(({ userData }) => {
+      this.sessionId = userData?.sub;
     });
   }
 
@@ -109,18 +131,14 @@ export class ChatComponent implements OnInit {
       const token: AtlassianTokenResponse = await this.oauthService.exchangeCodeForToken(code, state);
       this.oauthService.storeToken(token);
       this.isAtlassianAuthenticated = this.oauthService.isAtlassianAuthenticated();
-      this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
-        this.isAwsAuthenticated = isAuthenticated;
-      });
-      window.history.replaceState({}, document.title, window.location.pathname);
     } catch (error: any) {
       console.error('Atlassian OAuth callback failed:', error);
     }
   }
 
-  private sendStreaming(prompt: string, atlassianToken?: string): void {
+  private sendStreaming(prompt: string, atlassianToken?: string, sessionId?: string): void {
     this.messages.push({ role: 'assistant', content: '' });
-    this.agentService.invokeAgentStream(prompt, atlassianToken).subscribe({
+    this.agentService.invokeAgentStream(prompt, atlassianToken, sessionId).subscribe({
       next: (chunk: string) => this.handleStreamChunk(chunk),
       error: (error) => {
         this.pushErrorMessage(error.message, true);
@@ -133,8 +151,8 @@ export class ChatComponent implements OnInit {
     });
   }
 
-  private sendNonStreaming(prompt: string, atlassianToken?: string): void {
-    this.agentService.invokeAgent(prompt, atlassianToken).subscribe({
+  private sendNonStreaming(prompt: string, atlassianToken?: string, sessionId?: string): void {
+    this.agentService.invokeAgent(prompt, atlassianToken, sessionId).subscribe({
       next: (response: AgentResponse) => {
         this.messages.push({ role: 'assistant', content: this.extractResponseText(response) });
         this.loading = false;
