@@ -5,15 +5,13 @@ All heavy lifting is delegated to focused modules:
   hooks         – MemoryHook (Strands lifecycle callbacks)
   transport     – EnvTokenProvider + MCP transport factories
   agent_factory – get_agent() (cached Agent variants)
-  utils         – clean_text / clean_message_payload
 """
 import logging
-import os
 
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore.runtime import BedrockAgentCoreApp, PingStatus
 
 from .agent_factory import get_agent
-from .utils import clean_message_payload, clean_text
+from .transport import set_atlassian_token, set_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +31,26 @@ def _extract_user_message(payload: dict) -> str | None:
 
 
 def _set_atlassian_token(payload: dict) -> str | None:
-    """Inject the Atlassian token from the payload into the environment."""
+    """Bind the Atlassian token from the request payload to the current async context."""
     token = payload.get("atlassianToken")
     if token:
-        os.environ["ATLASSIAN_ACCESS_TOKEN"] = token
+        set_atlassian_token(token)
     return token
+
+
+def _extract_session_id(payload: dict) -> str:
+    """Return the sessionId from the payload, defaulting to 'default'."""
+    return payload.get("sessionId") or "default"
 
 
 def _normalise_result(result) -> dict:
     """Convert a Strands agent result into a JSON-serialisable message dict."""
     message = result.message
     if isinstance(message, (dict, list)):
-        return clean_message_payload(message)
+        return message
     return {
         "role": "assistant",
-        "content": [{"text": clean_text(message)}],
+        "content": [{"text": str(message)}],
     }
 
 
@@ -58,8 +61,9 @@ def _normalise_result(result) -> dict:
 @app.entrypoint
 def invoke(payload: dict) -> dict:
     """Synchronous (non-streaming) entrypoint."""
-    logger.info("Received payload: %s", payload)
+    logger.info("Received payload: %s", {k: "[REDACTED]" if k == "atlassianToken" else v for k, v in payload.items()})
     atlassian_token = _set_atlassian_token(payload)
+    set_session_id(_extract_session_id(payload))
     agent = get_agent(with_atlassian=bool(atlassian_token))
     user_message = _extract_user_message(payload)
     logger.info("Extracted message: %s", user_message)
@@ -69,8 +73,9 @@ def invoke(payload: dict) -> dict:
 @app.entrypoint
 async def invoke_stream(payload: dict, context=None):
     """Streaming entrypoint that yields Bedrock-compatible event dicts."""
-    logger.info("Received streaming payload: %s", payload)
+    logger.info("Received streaming payload: %s", {k: "[REDACTED]" if k == "atlassianToken" else v for k, v in payload.items()})
     atlassian_token = _set_atlassian_token(payload)
+    set_session_id(_extract_session_id(payload))
     agent = get_agent(with_atlassian=bool(atlassian_token))
     user_message = _extract_user_message(payload)
 
@@ -105,12 +110,10 @@ async def _stream_events(agent, user_message: str, context):
                 filtered, tool_block_indices = _filter_tool_event(evt, tool_block_indices)
                 if filtered:
                     continue
-                _clean_delta(evt)
 
             if "message" in event:
                 if _is_tool_message(event["message"]):
                     continue
-                _clean_message_content(event["message"])
 
             yield event
     except Exception as exc:
@@ -152,35 +155,17 @@ def _is_tool_message(message: dict) -> bool:
     )
 
 
-def _clean_message_content(message: dict) -> None:
-    message["content"] = [
-        {**item, "text": clean_text(item["text"])}
-        if isinstance(item, dict) and "text" in item
-        else item
-        for item in message.get("content", [])
-    ]
-
-
-def _clean_delta(evt: dict) -> None:
-    """Strip tool markup from incremental contentBlockDelta text in-place."""
-    if not isinstance(evt, dict):
-        return
-    delta = evt.get("contentBlockDelta", {}).get("delta")
-    if isinstance(delta, dict) and "text" in delta:
-        delta["text"] = clean_text(delta["text"], preserve_whitespace=True)
-
-
 async def _stream_fallback(agent, user_message: str):
     """One-shot fallback for agents that don't support stream_async."""
     try:
         result_payload = _normalise_result(agent(user_message))
         if isinstance(result_payload, dict) and "content" in result_payload:
-            yield {"message": clean_message_payload(result_payload)}
+            yield {"message": result_payload}
         else:
             yield {
                 "message": {
                     "role": "assistant",
-                    "content": [{"text": clean_text(str(result_payload))}],
+                    "content": [{"text": str(result_payload)}],
                 }
             }
     except Exception as exc:
@@ -193,7 +178,6 @@ async def _stream_fallback(agent, user_message: str):
 
 @app.ping
 def ping():
-    from bedrock_agentcore.runtime import PingStatus
     return PingStatus.HEALTHY
 
 
