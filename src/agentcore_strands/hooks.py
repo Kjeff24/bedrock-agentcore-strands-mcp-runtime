@@ -1,7 +1,8 @@
 """Strands agent lifecycle hooks."""
 import logging
 from strands.hooks import AgentInitializedEvent, HookProvider, MessageAddedEvent
-from .config import MEMORY_ID, MODEL_REGION
+from .config import MEMORY_ID, MODEL_REGION, SYSTEM_PROMPT
+from .transport import get_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -10,13 +11,19 @@ class MemoryHook(HookProvider):
     """Reads recent conversation turns from Bedrock AgentCore Memory on agent
     initialisation and persists each new message after it is added."""
 
-    def on_agent_initialized(self, event: AgentInitializedEvent) -> None:
-        if not MEMORY_ID:
-            return
-        from bedrock_agentcore.memory import MemoryClient
+    def __init__(self) -> None:
+        if MEMORY_ID:
+            from bedrock_agentcore.memory import MemoryClient
+            self._client = MemoryClient(region_name=MODEL_REGION)
+        else:
+            self._client = None
 
-        memory_client = MemoryClient(region_name=MODEL_REGION)
-        session_id = event.agent.state.get("session_id") or "default"
+    def on_agent_initialized(self, event: AgentInitializedEvent) -> None:
+        if not self._client:
+            return
+
+        memory_client = self._client
+        session_id = get_session_id()
         turns = memory_client.get_last_k_turns(
             memory_id=MEMORY_ID,
             actor_id="user",
@@ -27,12 +34,13 @@ class MemoryHook(HookProvider):
             context = "\n".join(
                 f"{m['role']}: {m['content']['text']}" for t in turns for m in t
             )
-            event.agent.system_prompt += f"\n\nPrevious:\n{context}"
+            # Replace (not append) so the cached agent's system prompt doesn't
+            # grow on every warm-cache request.
+            event.agent.system_prompt = SYSTEM_PROMPT + f"\n\nPrevious:\n{context}"
 
     def on_message_added(self, event: MessageAddedEvent) -> None:
-        if not MEMORY_ID:
+        if not self._client:
             return
-        from bedrock_agentcore.memory import MemoryClient
 
         msg = event.agent.messages[-1]
         role = msg.get("role", "")
@@ -65,10 +73,9 @@ class MemoryHook(HookProvider):
         if len(text) > _MAX_TEXT:
             text = text[:_MAX_TEXT] + " … [truncated]"
 
-        memory_client = MemoryClient(region_name=MODEL_REGION)
-        session_id = event.agent.state.get("session_id") or "default"
+        session_id = get_session_id()
         try:
-            memory_client.create_event(
+            self._client.create_event(
                 memory_id=MEMORY_ID,
                 actor_id="user",
                 session_id=session_id,
