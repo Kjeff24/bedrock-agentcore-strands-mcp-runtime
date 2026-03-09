@@ -5,8 +5,8 @@ Atlassian ``MCPClient`` must therefore be present in the ``tools`` list when
 the ``Agent`` is first instantiated – appending to the list afterwards has no
 effect.  To handle this, two agent variants are cached:
 
-- ``"base"``      – gateway-only (no Atlassian token available)
-- ``"atlassian"`` – gateway + Atlassian (token was supplied by the frontend)
+- ``"base"``      – no MCP tools (no Atlassian token available)
+- ``"atlassian"`` – Atlassian MCP (token was supplied by the frontend)
 """
 import logging
 from strands import Agent
@@ -15,7 +15,7 @@ from strands.tools.mcp.mcp_client import MCPClient
 
 from .config import MEMORY_ID, MODEL_ID, MODEL_REGION, SYSTEM_PROMPT
 from .hooks import MemoryHook
-from .transport import create_atlassian_transport, create_gateway_transport
+from .transport import create_atlassian_transport
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +24,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 bedrock_model = BedrockModel(model_id=MODEL_ID, region_name=MODEL_REGION)
 hooks = [MemoryHook()] if MEMORY_ID else []
-
-# ---------------------------------------------------------------------------
-# Base MCP clients (gateway only; Atlassian is added per-variant below)
-# ---------------------------------------------------------------------------
-_base_mcp_clients: list[MCPClient] = []
-_gateway_transport = create_gateway_transport()
-if _gateway_transport:
-    _base_mcp_clients.append(MCPClient(_gateway_transport))
 
 # ---------------------------------------------------------------------------
 # Agent cache
@@ -49,7 +41,7 @@ def get_agent(*, with_atlassian: bool = False) -> Agent:
     cache_key = "atlassian" if with_atlassian else "base"
 
     if cache_key not in _agent_cache:
-        clients = list(_base_mcp_clients)
+        clients: list[MCPClient] = []
 
         if with_atlassian:
             atlassian_transport = create_atlassian_transport()
@@ -61,7 +53,6 @@ def get_agent(*, with_atlassian: bool = False) -> Agent:
             system_prompt=SYSTEM_PROMPT,
             tools=clients,
             hooks=hooks,
-            state={"session_id": "default"},
         )
         logger.info(
             "Created agent instance (key=%s, tools=%d)", cache_key, len(clients)
