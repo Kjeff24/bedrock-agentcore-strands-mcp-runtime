@@ -92,23 +92,24 @@ terraform {
 ### Deploy Pipeline (`.github/workflows/deploy.yml`)
 
 **Triggers:**
-- Push to `main` branch → Deploys infrastructure
-- Pull request → Runs plan only
-- Manual trigger → Via GitHub UI
+- Manual trigger via `workflow_dispatch`
+- `push` event is present but branch filter is `none` (effectively disabled)
+- `pull_request` plan logic exists in jobs, but the workflow currently has no PR trigger
 
 **Jobs:**
-1. **terraform-gateway** - Deploys Gateway
+1. **terraform-gateway** - Init/fmt/validate (apply only on push to `main`)
 2. **build-push-image** - Builds ARM64 container and pushes to ECR
-3. **terraform-runtime** - Deploys Runtime with container
+3. **terraform-runtime** - Init/fmt/validate using built image (apply only on push to `main`)
 
 **Usage:**
 ```bash
-# Automatic on push to main
-git push origin main
-
 # Manual trigger
 # Go to Actions → Deploy AgentCore Infrastructure → Run workflow
 ```
+
+If you want automatic deploys from pushes, update `deploy.yml` to:
+- Replace `branches: [none]` with your deployment branch (for example `main`)
+- Adjust `if` conditions on Terraform `apply` steps if you want applies during manual runs
 
 ### Destroy Pipeline (`.github/workflows/destroy.yml`)
 
