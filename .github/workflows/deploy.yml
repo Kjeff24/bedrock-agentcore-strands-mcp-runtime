@@ -2,9 +2,7 @@ name: Deploy AgentCore Infrastructure
 
 on:
   push:
-    branches: [none]
-  pull_request:
-    branches: [none]
+    branches: [none] # Disable push triggers to prevent accidental deployments
   workflow_dispatch:
 
 env:
