@@ -58,7 +58,7 @@ Go to your repository → Settings → Secrets and variables → Actions
 Add:
 - `AWS_ROLE_ARN`: `arn:aws:iam::ACCOUNT_ID:role/GitHubActionsRole`
 
-### 4. Configure Terraform Backend (Optional)
+### 4. Configure Terraform Backend
 
 Create S3 bucket and DynamoDB table for state:
 
@@ -74,15 +74,22 @@ aws dynamodb create-table \
   --billing-mode PAY_PER_REQUEST
 ```
 
-Update `backend.tf` in both gateway and runtime:
+The workflow currently uses these defaults from `deploy.yml`:
+- Terraform state bucket: `account-vending-terraform-state`
+- AWS region: `eu-west-1`
+- Project name: `agentvault_agent`
+- Environment name: `prod`
+
+The workflow keeps the per-module backend keys from each `backend.tf` file under `infra/terraform/*`.
+
+Update `backend.tf` files if you want to change the backend key layout:
 ```hcl
 terraform {
   backend "s3" {
-    bucket         = "your-terraform-state-bucket"
-    key            = "gateway/terraform.tfstate"  # or "runtime/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "terraform-state-lock"
-    encrypt        = true
+    bucket       = "your-terraform-state-bucket"
+    key          = "agentcore/runtime/terraform.tfstate"
+    region       = "eu-west-1"
+    use_lockfile = true
   }
 }
 ```
@@ -92,24 +99,30 @@ terraform {
 ### Deploy Pipeline (`.github/workflows/deploy.yml`)
 
 **Triggers:**
-- Manual trigger via `workflow_dispatch`
-- `push` event is present but branch filter is `none` (effectively disabled)
-- `pull_request` plan logic exists in jobs, but the workflow currently has no PR trigger
+- `push` to `develop` validates and deploys the platform
+- `workflow_dispatch` supports manual validation or manual apply via the `apply` input
 
 **Jobs:**
-1. **terraform-gateway** - Init/fmt/validate (apply only on push to `main`)
-2. **build-push-image** - Builds ARM64 container and pushes to ECR
-3. **terraform-runtime** - Init/fmt/validate using built image (apply only on push to `main`)
+1. **prepare** - Resolves deploy settings such as region, names, and image tag
+2. **validate-terraform** - Runs `fmt` and `validate` across `ecr`, `cognito`, `memory`, `gateway`, and `runtime`
+3. **validate-image** - Verifies the ARM64 runtime image build
+4. **preflight** - Checks required repo config and Terraform backend access before deployment
+5. **deploy-ecr** - Creates or updates the ECR repository
+6. **build-image** - Builds and pushes the runtime image to ECR
+7. **deploy-cognito** - Applies Cognito resources and exposes JWT/OIDC outputs
+8. **deploy-memory** - Applies AgentCore Memory resources
+9. **deploy-gateway** - Applies AgentCore Gateway resources
+10. **deploy-runtime** - Applies Runtime using image, gateway, memory, and Cognito outputs
 
 **Usage:**
 ```bash
-# Manual trigger
-# Go to Actions → Deploy AgentCore Infrastructure → Run workflow
-```
+# Automatic deploy on push to develop
+git push origin develop
 
-If you want automatic deploys from pushes, update `deploy.yml` to:
-- Replace `branches: [none]` with your deployment branch (for example `main`)
-- Adjust `if` conditions on Terraform `apply` steps if you want applies during manual runs
+# Manual trigger
+# Go to Actions → Deploy AgentCore Platform → Run workflow
+# Set apply=false for validation-only manual runs
+```
 
 ### Destroy Pipeline (`.github/workflows/destroy.yml`)
 
@@ -130,29 +143,30 @@ If you want automatic deploys from pushes, update `deploy.yml` to:
 
 ### Change AWS Region
 
-Edit `.github/workflows/deploy.yml`:
-```yaml
-env:
-  AWS_REGION: eu-west-1  # Change this
-```
+Edit the `env` block in `.github/workflows/deploy.yml`. If your Terraform backend bucket is in another region, update `TF_STATE_REGION` as well.
 
 ### Add Environment Variables
 
-For gateway with MCP target:
+For environment-wide naming overrides, edit the `env` block in `.github/workflows/deploy.yml`:
+- `PROJECT_NAME`
+- `ENVIRONMENT_NAME`
+- `ECR_REPOSITORY`
+- `MEMORY_NAME`
+- `RUNTIME_NAME`
+
+For gateway with MCP target, keep the workflow unchanged and manage the target configuration through files or variables in `infra/terraform/gateway`.
+
+Example apply command used by the workflow pattern:
 
 ```yaml
-- name: Terraform Apply
+- name: Terraform Plan
   run: |
-    terraform apply -auto-approve \
+    terraform plan -out=tfplan \
       -var="add_mcp_target=true" \
-      -var="mcp_server_endpoint=${{ secrets.MCP_SERVER_ENDPOINT }}" \
+      -var="mcp_server_endpoint=https://your-mcp-server.com" \
       -var="mcp_auth_type=API_KEY" \
-      -var='mcp_api_key_config={secret_arn="${{ secrets.API_KEY_SECRET_ARN }}"}'
+      -var='mcp_api_key_config={secret_arn="arn:aws:secretsmanager:REGION:ACCOUNT:secret:mcp-api-key"}'
 ```
-
-Add secrets:
-- `MCP_SERVER_ENDPOINT`
-- `API_KEY_SECRET_ARN`
 
 ### Multi-Environment Setup
 
@@ -169,7 +183,7 @@ env:
   ENVIRONMENT: dev
 
 jobs:
-  terraform-gateway:
+  deploy-gateway:
     steps:
       - name: Terraform Apply
         run: |
@@ -188,7 +202,7 @@ Actions → Select workflow run → View job logs
 
 ### Check Terraform Outputs
 ```bash
-# Gateway URL and Runtime ARN are output in the logs
+# Gateway URL, Cognito outputs, and Runtime ARN are written to the job summary
 # Or query via AWS CLI:
 aws bedrock-agentcore list-gateways
 aws bedrock-agentcore list-agent-runtimes
@@ -216,6 +230,8 @@ aws dynamodb delete-item \
 - Check CloudWatch logs for detailed errors
 - Verify all required AWS services are available in region
 - Check service quotas
+- Confirm the backend bucket in `deploy.yml` and the Terraform `backend.tf` files is correct for your AWS account
+- Confirm `AWS_ROLE_ARN` is configured in the repository
 
 ## Security Best Practices
 
