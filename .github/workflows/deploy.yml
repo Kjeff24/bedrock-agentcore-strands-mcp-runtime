@@ -1,28 +1,429 @@
-name: Deploy AgentCore Infrastructure
+name: Deploy AgentCore Platform
 
 on:
   push:
-    branches: [none]
-  pull_request:
-    branches: [none]
+    branches:
+      - develop
   workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply infrastructure changes after validation
+        required: true
+        type: boolean
+        default: true
+      image_tag:
+        description: Optional container image tag override
+        required: false
+        type: string
+
+concurrency:
+  group: agentcore-platform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
 
 env:
-  AWS_REGION: us-east-1
-  TF_VERSION: 1.5.0
+  TF_VERSION: "1.9.8"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: "eu-west-1"
+  TF_STATE_REGION: "eu-west-1"
+  TF_STATE_BUCKET: "account-vending-terraform-state"
+  PROJECT_NAME: "agentvault_agent"
+  ENVIRONMENT_NAME: "prod"
+  ECR_REPOSITORY: "agentvault_agent"
+  MEMORY_NAME: "agentvault_memory"
+  RUNTIME_NAME: "agentvault_runtime"
 
 jobs:
-  terraform-gateway:
+  prepare:
+    name: Prepare Deployment Settings
+    runs-on: ubuntu-latest
+    outputs:
+      should_apply: ${{ steps.settings.outputs.should_apply }}
+      aws_region: ${{ steps.settings.outputs.aws_region }}
+      backend_region: ${{ steps.settings.outputs.backend_region }}
+      project_name: ${{ steps.settings.outputs.project_name }}
+      environment_name: ${{ steps.settings.outputs.environment_name }}
+      ecr_repository: ${{ steps.settings.outputs.ecr_repository }}
+      memory_name: ${{ steps.settings.outputs.memory_name }}
+      runtime_name: ${{ steps.settings.outputs.runtime_name }}
+      image_tag: ${{ steps.settings.outputs.image_tag }}
+    steps:
+      - name: Resolve workflow settings
+        id: settings
+        env:
+          DISPATCH_APPLY: ${{ github.event.inputs.apply }}
+          DISPATCH_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          aws_region="${AWS_REGION:-eu-west-1}"
+          backend_region="${TF_STATE_REGION:-$aws_region}"
+          project_name="${PROJECT_NAME:-agentvault_agent}"
+          environment_name="${ENVIRONMENT_NAME:-prod}"
+          ecr_repository="${ECR_REPOSITORY:-$project_name}"
+          memory_name="${MEMORY_NAME:-agentvault_memory}"
+          runtime_name="${RUNTIME_NAME:-agentvault_runtime}"
+          image_tag="${DISPATCH_IMAGE_TAG:-}"
+
+          if [[ -z "$image_tag" ]]; then
+            image_tag="${GITHUB_SHA::12}"
+          fi
+
+          should_apply=false
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            should_apply=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_APPLY:-false}" == "true" ]]; then
+            should_apply=true
+          fi
+
+          echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
+          echo "backend_region=$backend_region" >> "$GITHUB_OUTPUT"
+          echo "project_name=$project_name" >> "$GITHUB_OUTPUT"
+          echo "environment_name=$environment_name" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository=$ecr_repository" >> "$GITHUB_OUTPUT"
+          echo "memory_name=$memory_name" >> "$GITHUB_OUTPUT"
+          echo "runtime_name=$runtime_name" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "should_apply=$should_apply" >> "$GITHUB_OUTPUT"
+
+      - name: Write execution summary
+        run: |
+          {
+            echo "## Deployment Settings"
+            echo ""
+            echo "- Event: ${GITHUB_EVENT_NAME}"
+            echo "- Apply changes: ${{ steps.settings.outputs.should_apply }}"
+            echo "- AWS region: ${{ steps.settings.outputs.aws_region }}"
+            echo "- Project name: ${{ steps.settings.outputs.project_name }}"
+            echo "- Environment: ${{ steps.settings.outputs.environment_name }}"
+            echo "- ECR repository: ${{ steps.settings.outputs.ecr_repository }}"
+            echo "- Image tag: ${{ steps.settings.outputs.image_tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-terraform:
+    name: Validate Terraform (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - ecr
+          - cognito
+          - memory
+          - gateway
+          - runtime
+    defaults:
+      run:
+        working-directory: infra/terraform/${{ matrix.module }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  validate-image:
+    name: Validate Runtime Image Build
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          tags: agentcore-runtime:${{ needs.prepare.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  preflight:
+    name: Validate Deployment Configuration
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - validate-terraform
+      - validate-image
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 10
+    steps:
+      - name: Check required repository configuration
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$AWS_ROLE_ARN" ]] || { echo "::error::Missing required secret AWS_ROLE_ARN"; exit 1; }
+          [[ -n "${TF_STATE_BUCKET}" ]] || { echo "::error::Missing TF_STATE_BUCKET value in deploy.yml env"; exit 1; }
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-preflight
+
+      - name: Verify Terraform backend bucket access
+        run: |
+          set -euo pipefail
+          aws s3api head-bucket --bucket "${TF_STATE_BUCKET}"
+
+  deploy-ecr:
+    name: Deploy ECR
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - preflight
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 20
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/terraform/ecr
+    outputs:
+      repository_url: ${{ steps.capture.outputs.repository_url }}
+      repository_name: ${{ steps.capture.outputs.repository_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-ecr
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${{ needs.prepare.outputs.backend_region }}"
+
+      - name: Terraform Plan
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -lock-timeout=5m -out=tfplan \
+            -var="aws_region=${{ needs.prepare.outputs.aws_region }}" \
+            -var="project_name=${{ needs.prepare.outputs.project_name }}" \
+            -var="environment_name=${{ needs.prepare.outputs.environment_name }}" \
+            -var="repository_name=${{ needs.prepare.outputs.ecr_repository }}"
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Capture Terraform Outputs
+        id: capture
+        run: |
+          set -euo pipefail
+          echo "repository_url=$(terraform output -raw repository_url)" >> "$GITHUB_OUTPUT"
+          echo "repository_name=$(terraform output -raw repository_name)" >> "$GITHUB_OUTPUT"
+
+  build-image:
+    name: Build and Push Runtime Image
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - deploy-ecr
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 30
+    environment: production
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-image
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ needs.deploy-ecr.outputs.repository_url }}:${{ needs.prepare.outputs.image_tag }}
+            ${{ needs.deploy-ecr.outputs.repository_url }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Publish image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "image_uri=${{ needs.deploy-ecr.outputs.repository_url }}:${{ needs.prepare.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
+
+  deploy-cognito:
+    name: Deploy Cognito
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - preflight
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 20
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/terraform/cognito
+    outputs:
+      cognito_authority: ${{ steps.capture.outputs.cognito_authority }}
+      user_pool_client_id: ${{ steps.capture.outputs.user_pool_client_id }}
+      user_pool_id: ${{ steps.capture.outputs.user_pool_id }}
+      user_pool_domain: ${{ steps.capture.outputs.user_pool_domain }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-cognito
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${{ needs.prepare.outputs.backend_region }}"
+
+      - name: Terraform Plan
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -lock-timeout=5m -out=tfplan \
+            -var="aws_region=${{ needs.prepare.outputs.aws_region }}" \
+            -var="project_name=${{ needs.prepare.outputs.project_name }}" \
+            -var="environment_name=${{ needs.prepare.outputs.environment_name }}"
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Capture Terraform Outputs
+        id: capture
+        run: |
+          set -euo pipefail
+          echo "cognito_authority=$(terraform output -raw cognito_authority)" >> "$GITHUB_OUTPUT"
+          echo "user_pool_client_id=$(terraform output -raw user_pool_client_id)" >> "$GITHUB_OUTPUT"
+          echo "user_pool_id=$(terraform output -raw user_pool_id)" >> "$GITHUB_OUTPUT"
+          echo "user_pool_domain=$(terraform output -raw user_pool_domain)" >> "$GITHUB_OUTPUT"
+
+  deploy-memory:
+    name: Deploy Memory
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - preflight
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 20
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/terraform/memory
+    outputs:
+      memory_id: ${{ steps.capture.outputs.memory_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-memory
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${{ needs.prepare.outputs.backend_region }}"
+
+      - name: Terraform Plan
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -lock-timeout=5m -out=tfplan \
+            -var="aws_region=${{ needs.prepare.outputs.aws_region }}" \
+            -var="project_name=${{ needs.prepare.outputs.project_name }}" \
+            -var="environment_name=${{ needs.prepare.outputs.environment_name }}" \
+            -var="memory_name=${{ needs.prepare.outputs.memory_name }}"
+
+      - name: Terraform Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Capture Terraform Outputs
+        id: capture
+        run: |
+          set -euo pipefail
+          echo "memory_id=$(terraform output -raw memory_id)" >> "$GITHUB_OUTPUT"
+
+  deploy-gateway:
     name: Deploy Gateway
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    
+    needs:
+      - prepare
+      - preflight
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 20
+    environment: production
     defaults:
       run:
         working-directory: infra/terraform/gateway
-    
+    outputs:
+      gateway_id: ${{ steps.capture.outputs.gateway_id }}
+      gateway_url: ${{ steps.capture.outputs.gateway_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +432,8 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-gateway
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -39,78 +441,49 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Format Check
-        run: terraform fmt -check
-
-      - name: Terraform Validate
-        run: terraform validate
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${{ needs.prepare.outputs.backend_region }}"
 
       - name: Terraform Plan
-        if: github.event_name == 'pull_request'
-        run: terraform plan -no-color
-        continue-on-error: true
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -lock-timeout=5m -out=tfplan \
+            -var="aws_region=${{ needs.prepare.outputs.aws_region }}" \
+            -var="project_name=${{ needs.prepare.outputs.project_name }}" \
+            -var="environment_name=${{ needs.prepare.outputs.environment_name }}"
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform apply -auto-approve
+        run: terraform apply -input=false -auto-approve tfplan
 
-      - name: Output Gateway URL
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform output gateway_url
-
-  build-push-image:
-    name: Build and Push Container
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    outputs:
-      image_uri: ${{ steps.build.outputs.image_uri }}
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Create ECR Repository
+      - name: Capture Terraform Outputs
+        id: capture
         run: |
-          aws ecr describe-repositories --repository-names agentcore-agent || \
-          aws ecr create-repository --repository-name agentcore-agent
+          set -euo pipefail
+          echo "gateway_id=$(terraform output -raw gateway_id)" >> "$GITHUB_OUTPUT"
+          echo "gateway_url=$(terraform output -raw gateway_url)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and Push Image
-        id: build
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: agentcore-agent
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build --platform linux/arm64 -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image_uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-  terraform-runtime:
+  deploy-runtime:
     name: Deploy Runtime
     runs-on: ubuntu-latest
-    needs: [terraform-gateway, build-push-image]
-    permissions:
-      id-token: write
-      contents: read
-    
+    needs:
+      - prepare
+      - build-image
+      - deploy-cognito
+      - deploy-memory
+      - deploy-gateway
+    if: needs.prepare.outputs.should_apply == 'true'
+    timeout-minutes: 25
+    environment: production
     defaults:
       run:
         working-directory: infra/terraform/runtime
-    
+    outputs:
+      runtime_arn: ${{ steps.capture.outputs.runtime_arn }}
+      runtime_id: ${{ steps.capture.outputs.runtime_id }}
+      runtime_version: ${{ steps.capture.outputs.runtime_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -119,7 +492,8 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ needs.prepare.outputs.aws_region }}
+          role-session-name: github-actions-agentcore-runtime
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -127,27 +501,59 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Format Check
-        run: terraform fmt -check
-
-      - name: Terraform Validate
-        run: terraform validate
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${{ needs.prepare.outputs.backend_region }}"
 
       - name: Terraform Plan
-        if: github.event_name == 'pull_request'
         run: |
-          terraform plan -no-color \
-            -var="container_image_uri=${{ needs.build-push-image.outputs.image_uri }}"
-        continue-on-error: true
+          set -euo pipefail
+          terraform plan -input=false -lock-timeout=5m -out=tfplan \
+            -var="aws_region=${{ needs.prepare.outputs.aws_region }}" \
+            -var="project_name=${{ needs.prepare.outputs.project_name }}" \
+            -var="environment_name=${{ needs.prepare.outputs.environment_name }}" \
+            -var="runtime_name=${{ needs.prepare.outputs.runtime_name }}" \
+            -var="container_image_uri=${{ needs.build-image.outputs.image_uri }}" \
+            -var="gateway_id=${{ needs.deploy-gateway.outputs.gateway_id }}" \
+            -var="memory_id=${{ needs.deploy-memory.outputs.memory_id }}" \
+            -var="jwt_issuer=${{ needs.deploy-cognito.outputs.cognito_authority }}" \
+            -var="jwt_audience=${{ needs.deploy-cognito.outputs.user_pool_client_id }}"
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: |
-          terraform apply -auto-approve \
-            -var="container_image_uri=${{ needs.build-push-image.outputs.image_uri }}"
+        run: terraform apply -input=false -auto-approve tfplan
 
-      - name: Output Runtime ARN
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform output runtime_arn
+      - name: Capture Terraform Outputs
+        id: capture
+        run: |
+          set -euo pipefail
+          echo "runtime_arn=$(terraform output -raw runtime_arn)" >> "$GITHUB_OUTPUT"
+          echo "runtime_id=$(terraform output -raw runtime_id)" >> "$GITHUB_OUTPUT"
+          echo "runtime_version=$(terraform output -raw runtime_version)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish deployment summary
+        run: |
+          {
+            echo "## AgentCore Platform Deployment"
+            echo ""
+            echo "- AWS region: ${{ needs.prepare.outputs.aws_region }}"
+            echo "- ECR image: ${{ needs.build-image.outputs.image_uri }}"
+            echo "- Gateway ID: ${{ needs.deploy-gateway.outputs.gateway_id }}"
+            echo "- Gateway URL: ${{ needs.deploy-gateway.outputs.gateway_url }}"
+            echo "- Memory ID: ${{ needs.deploy-memory.outputs.memory_id }}"
+            echo "- Cognito authority: ${{ needs.deploy-cognito.outputs.cognito_authority }}"
+            echo "- Cognito client ID: ${{ needs.deploy-cognito.outputs.user_pool_client_id }}"
+            echo "- Cognito domain: ${{ needs.deploy-cognito.outputs.user_pool_domain }}"
+            echo "- Runtime ARN: ${{ steps.capture.outputs.runtime_arn }}"
+            echo "- Runtime ID: ${{ steps.capture.outputs.runtime_id }}"
+            echo "- Runtime version: ${{ steps.capture.outputs.runtime_version }}"
+            echo ""
+            echo "### Post-deploy diagnostics"
+            echo "\`\`\`"
+            echo "aws logs tail /aws/bedrock-agentcore/runtimes/${{ steps.capture.outputs.runtime_id }}-DEFAULT --follow --region ${{ needs.prepare.outputs.aws_region }}"
+            echo "\`\`\`"
+            echo ""
+            echo "### Follow-up"
+            echo "- Update frontend environment files with Cognito outputs and runtime endpoint details."
+          } >> "$GITHUB_STEP_SUMMARY"
