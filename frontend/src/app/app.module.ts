@@ -32,8 +32,8 @@ const routes: Routes = [
     AuthModule.forRoot({
       config: {
         authority: environment.cognito.authority,
-        redirectUrl: environment.cognito.redirectUrl,
-        postLogoutRedirectUri: environment.cognito.logoutUrl,
+        redirectUrl: `${window.location.origin}${environment.cognito.redirectPath}`,
+        postLogoutRedirectUri: `${window.location.origin}${environment.cognito.logoutPath}`,
         clientId: environment.cognito.clientId,
         scope: environment.cognito.scope,
         responseType: 'code',
