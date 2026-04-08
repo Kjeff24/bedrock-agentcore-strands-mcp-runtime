@@ -12,9 +12,9 @@ export const environment = {
   cognito: {
     authority: 'https://cognito-idp.REGION.amazonaws.com/USER_POOL_ID',
     clientId: 'YOUR_COGNITO_CLIENT_ID',
-    redirectUrl: 'https://your-production-domain.com/',
-    logoutUrl: 'https://your-production-domain.com/',
+    redirectPath: '/callback',
+    logoutPath: '/logout',
     scope: 'openid profile email',
-    userPoolDomain: 'YOUR_PRODUCTION_USER_POOL_DOMAIN'
+    userPoolDomain: 'https://YOUR_PRODUCTION_USER_POOL_DOMAIN'
   }
 };

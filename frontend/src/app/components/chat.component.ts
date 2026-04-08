@@ -54,8 +54,9 @@ export class ChatComponent implements OnInit {
 
   logoutAws(): void {
     sessionStorage.clear();
-    const { userPoolDomain, clientId, logoutUrl } = environment.cognito;
-    window.location.href = `https://${userPoolDomain}/logout?client_id=${clientId}&logout_uri=${logoutUrl}`;
+    const { userPoolDomain, clientId, logoutPath } = environment.cognito;
+    const logoutUri = encodeURIComponent(`${window.location.origin}${logoutPath}`);
+    window.location.href = `${userPoolDomain}/logout?client_id=${clientId}&logout_uri=${logoutUri}`;
   }
 
   authenticateAtlassian(): void {
