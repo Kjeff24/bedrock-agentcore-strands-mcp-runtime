@@ -20,6 +20,7 @@ export class ChatComponent implements OnInit {
   isAtlassianAuthenticated = false;
   useStreaming = true;
   sessionId: string | undefined;
+  loginError: string | null = null;
 
   constructor(
     private oauthService: OAuthService,
@@ -31,18 +32,26 @@ export class ChatComponent implements OnInit {
     const params = new URLSearchParams(window.location.search);
 
     if (path === '/callback') {
-      // Cognito redirect — let the OIDC library see the URL as-is.
-      this.initAwsAuth();
-      this.handleCognitoCallback();
+      if (params.has('error')) {
+        const msg = decodeURIComponent(params.get('error_description') ?? params.get('error') ?? 'Login failed');
+        sessionStorage.setItem('login_error', msg);
+        window.location.replace('/');
+        return;
+      }
+      this.initAwsAuth(() => { window.location.href = '/'; });
     } else if (path === '/' && params.has('code') && params.has('state')) {
-      // Atlassian OAuth callback. Strip code/state from the URL BEFORE calling
-      // checkAuth() so the OIDC library doesn't mistake Atlassian's params for
-      // a Cognito auth callback and invalidate the existing Cognito session.
+      // Strip Atlassian callback params before OIDC auth check.
       window.history.replaceState({}, document.title, window.location.pathname);
       this.initAwsAuth();
       this.handleAtlassianCallback(params.get('code')!, params.get('state')!);
     } else {
       this.initAwsAuth();
+    }
+
+    const storedError = sessionStorage.getItem('login_error');
+    if (storedError) {
+      this.loginError = storedError;
+      sessionStorage.removeItem('login_error');
     }
 
     this.isAtlassianAuthenticated = this.oauthService.isAtlassianAuthenticated();
@@ -77,8 +86,6 @@ export class ChatComponent implements OnInit {
     this.loading = true;
     this.scrollToBottom();
 
-    // Re-evaluate Atlassian auth on each send so an expired token is caught
-    // promptly and the user is prompted to reconnect.
     const atlassianToken = this.oauthService.getValidAccessToken();
     this.isAtlassianAuthenticated = !!atlassianToken;
 
@@ -94,9 +101,6 @@ export class ChatComponent implements OnInit {
     }
   }
 
-  // ─── Private helpers ───────────────────────────────────────────────────────
-
-  /** Enter sends, Shift+Enter inserts a newline. */
   onKeyDown(event: KeyboardEvent): void {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -104,9 +108,16 @@ export class ChatComponent implements OnInit {
     }
   }
 
-  private initAwsAuth(): void {
-    this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
+  private initAwsAuth(onSuccess?: () => void): void {
+    console.log('[Auth Debug] checkAuth() called — current URL:', window.location.href);
+    this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated, errorMessage, accessToken, idToken }) => {
+      console.log('[Auth Debug] checkAuth() result — isAuthenticated:', isAuthenticated, '| errorMessage:', errorMessage ?? 'none');
+      if (accessToken) console.log('[Auth Debug] accessToken present ✓');
+      if (idToken) console.log('[Auth Debug] idToken present ✓');
       this.isAwsAuthenticated = isAuthenticated;
+      if (isAuthenticated) {
+        onSuccess?.();
+      }
     });
     this.oidcSecurityService.isAuthenticated$.subscribe(({ isAuthenticated }) => {
       this.isAwsAuthenticated = isAuthenticated;
@@ -114,17 +125,6 @@ export class ChatComponent implements OnInit {
     this.oidcSecurityService.userData$.subscribe(({ userData }) => {
       this.sessionId = userData?.sub;
     });
-  }
-
-  private handleCognitoCallback(): void {
-    setTimeout(() => {
-      this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
-        this.isAwsAuthenticated = isAuthenticated;
-        if (isAuthenticated) {
-          window.location.href = '/';
-        }
-      });
-    }, 1000);
   }
 
   private async handleAtlassianCallback(code: string, state: string): Promise<void> {
@@ -180,7 +180,6 @@ export class ChatComponent implements OnInit {
         return;
       }
 
-      // Final aggregated message from backend
       if (event.message?.content && Array.isArray(event.message.content)) {
         const text = event.message.content
           .map((c: any) => c?.text ?? '')
@@ -190,14 +189,12 @@ export class ChatComponent implements OnInit {
         return;
       }
 
-      // Incremental text delta
       const deltaText = event.event?.contentBlockDelta?.delta?.text;
       if (typeof deltaText === 'string' && deltaText) {
         last.content += deltaText;
         this.scrollToBottom();
       }
     } catch {
-      // Non-JSON chunk; ignore
     }
   }
 

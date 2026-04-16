@@ -37,6 +37,7 @@ const routes: Routes = [
         clientId: environment.cognito.clientId,
         scope: environment.cognito.scope,
         responseType: 'code',
+        triggerAuthorizationResultEvent: true,
         silentRenew: true,
         useRefreshToken: true,
         renewTimeBeforeTokenExpiresInSeconds: 30,
