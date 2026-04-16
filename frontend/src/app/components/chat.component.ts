@@ -20,6 +20,7 @@ export class ChatComponent implements OnInit {
   isAtlassianAuthenticated = false;
   useStreaming = true;
   sessionId: string | undefined;
+  loginError: string | null = null;
 
   constructor(
     private oauthService: OAuthService,
@@ -31,9 +32,21 @@ export class ChatComponent implements OnInit {
     const params = new URLSearchParams(window.location.search);
 
     if (path === '/callback') {
-      // Cognito redirect — let the OIDC library see the URL as-is.
-      this.initAwsAuth();
-      this.handleCognitoCallback();
+      // If Cognito returned an OAuth2 error (e.g. access_denied, user not found
+      // in the user pool after Microsoft Entra federation), the URL will have
+      // ?error=...&state=... but NO code.  Passing that URL to checkAuth() causes
+      // the OIDC library to log "[ERROR] no code in url" and leave the user stuck.
+      // Detect this upfront, persist the message, and redirect home.
+      if (params.has('error')) {
+        const msg = decodeURIComponent(params.get('error_description') ?? params.get('error') ?? 'Login failed');
+        sessionStorage.setItem('login_error', msg);
+        window.location.replace('/');
+        return;
+      }
+      // Happy path: checkAuth() must only be called ONCE here; calling it a second
+      // time causes state-validation failure (the state is consumed on the first
+      // call) which may return isAuthenticated=false and clear stored tokens.
+      this.initAwsAuth(() => { window.location.href = '/'; });
     } else if (path === '/' && params.has('code') && params.has('state')) {
       // Atlassian OAuth callback. Strip code/state from the URL BEFORE calling
       // checkAuth() so the OIDC library doesn't mistake Atlassian's params for
@@ -43,6 +56,13 @@ export class ChatComponent implements OnInit {
       this.handleAtlassianCallback(params.get('code')!, params.get('state')!);
     } else {
       this.initAwsAuth();
+    }
+
+    // Pick up any login error forwarded from the /callback error handler.
+    const storedError = sessionStorage.getItem('login_error');
+    if (storedError) {
+      this.loginError = storedError;
+      sessionStorage.removeItem('login_error');
     }
 
     this.isAtlassianAuthenticated = this.oauthService.isAtlassianAuthenticated();
@@ -104,9 +124,16 @@ export class ChatComponent implements OnInit {
     }
   }
 
-  private initAwsAuth(): void {
-    this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
+  private initAwsAuth(onSuccess?: () => void): void {
+    console.log('[Auth Debug] checkAuth() called — current URL:', window.location.href);
+    this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated, errorMessage, accessToken, idToken }) => {
+      console.log('[Auth Debug] checkAuth() result — isAuthenticated:', isAuthenticated, '| errorMessage:', errorMessage ?? 'none');
+      if (accessToken) console.log('[Auth Debug] accessToken present ✓');
+      if (idToken) console.log('[Auth Debug] idToken present ✓');
       this.isAwsAuthenticated = isAuthenticated;
+      if (isAuthenticated) {
+        onSuccess?.();
+      }
     });
     this.oidcSecurityService.isAuthenticated$.subscribe(({ isAuthenticated }) => {
       this.isAwsAuthenticated = isAuthenticated;
@@ -114,17 +141,6 @@ export class ChatComponent implements OnInit {
     this.oidcSecurityService.userData$.subscribe(({ userData }) => {
       this.sessionId = userData?.sub;
     });
-  }
-
-  private handleCognitoCallback(): void {
-    setTimeout(() => {
-      this.oidcSecurityService.checkAuth().subscribe(({ isAuthenticated }) => {
-        this.isAwsAuthenticated = isAuthenticated;
-        if (isAuthenticated) {
-          window.location.href = '/';
-        }
-      });
-    }, 1000);
   }
 
   private async handleAtlassianCallback(code: string, state: string): Promise<void> {
