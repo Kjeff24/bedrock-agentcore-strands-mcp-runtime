@@ -37,9 +37,6 @@ const routes: Routes = [
         clientId: environment.cognito.clientId,
         scope: environment.cognito.scope,
         responseType: 'code',
-        // Prevent the library from calling router.navigateByUrl() after the
-        // callback — we handle the redirect ourselves in ChatComponent so that
-        // a hard reload (window.location.href) clears stale in-memory state.
         triggerAuthorizationResultEvent: true,
         silentRenew: true,
         useRefreshToken: true,
